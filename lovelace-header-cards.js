@@ -373,7 +373,9 @@ function watchList(config) {
     for (const [name, item] of Object.entries(value)) {
       if (rule && !PLAIN_RULE.has(name)) hard = true;
       if (name === "template") hard = true;
-      walk(item, name, rule && name !== "options");
+      if (rule && name === "entity_id" && /[*/]/.test(String(item))) hard = true;
+      // Only not/or/and hold nested rules; sort and options are settings, not filters.
+      walk(item, name, rule && (name === "not" || name === "or" || name === "and"));
     }
   };
   walk(config.cards, "cards", false);
