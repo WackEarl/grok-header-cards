@@ -347,6 +347,40 @@ function labelNames(hass, entityId) {
   return names;
 }
 
+const ENTITY_RE = /\b[a-z_]+\.[a-z0-9_]+\b/g;
+// Keys an auto-entities include rule may use and still be resolved here.
+const PLAIN_RULE = new Set(["label", "state", "entity_id", "options", "not", "or", "and", "sort", "type"]);
+const SOFT_GAP = 2000;
+
+// Which entities can change what the hosted cards show? `hard` means the
+// config filters in ways we cannot follow (domain, area, template, ...).
+function watchList(config) {
+  const ids = new Set();
+  const labels = new Set((config.labels || []).map((label) => String(label).toLowerCase()));
+  let hard = false;
+  const walk = (value, key, rule) => {
+    if (typeof value === "string") {
+      if (key === "label" || key === "labels") labels.add(value.toLowerCase());
+      if (rule && key === "entity_id" && /[*/]/.test(value)) hard = true;
+      for (const match of value.matchAll(ENTITY_RE)) ids.add(match[0]);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, key, rule || key === "include" || key === "or" || key === "and");
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [name, item] of Object.entries(value)) {
+      if (rule && !PLAIN_RULE.has(name)) hard = true;
+      if (name === "template") hard = true;
+      walk(item, name, rule && name !== "options");
+    }
+  };
+  walk(config.cards, "cards", false);
+  walk(config.badges, "badges", false);
+  return { ids, labels, hard };
+}
+
 function waitForElement(tag, ms) {
   if (customElements.get(tag)) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -481,7 +515,7 @@ class HeaderCardsController {
     if (!this._slot) return;
     if (event.event_type === "entity_registry_updated") {
       if (this._usesLabels) this.schedule();
-      else this.applyHass();
+      else this.applyHass(true);
       return;
     }
     if (event.event_type !== "state_changed") return;
@@ -490,11 +524,11 @@ class HeaderCardsController {
     const prev = data.old_state && data.old_state.state;
     const next = data.new_state && data.new_state.state;
     if (!this._usesLabels || (prev === next && !(this._chipIds && this._chipIds.has(id)))) {
-      this.applyHass();
+      this.applyHass(this.isRelevant(id));
       return;
     }
     if (prev !== "on" && next !== "on" && !(this._chipIds && this._chipIds.has(id))) {
-      this.applyHass();
+      this.applyHass(this.isRelevant(id));
       return;
     }
     this.schedule();
@@ -1165,12 +1199,42 @@ class HeaderCardsController {
     return true;
   }
 
-  applyHass() {
-    clearTimeout(this._hassTimer);
+  // true: forward soon; null: unknown, forward at most every SOFT_GAP;
+  // false: nothing in the header depends on it, plan nothing.
+  isRelevant(id) {
+    if (this._watchFor !== this._config) {
+      this._watchFor = this._config;
+      this._watch = this._config ? watchList(this._config) : null;
+    }
+    const watch = this._watch;
+    if (!watch || watch.hard) return null;
+    if (watch.ids.has(id) || (this._chipIds && this._chipIds.has(id))) return true;
+    if (!watch.labels.size) return false;
+    const hass = hassOf();
+    if (!hass || !hass.entities) return null;
+    return labelNames(hass, id).some((name) => watch.labels.has(name));
+  }
+
+  applyHass(relevant = true) {
+    if (relevant === true) this._hassDirty = true;
+    else if (relevant === null) this._hassSoft = true;
+    if (this._hassTimer || (!this._hassDirty && !this._hassSoft)) return;
     this._hassTimer = setTimeout(() => this.flushHass(), 50);
   }
 
   flushHass() {
+    this._hassTimer = null;
+    if (!this._hassDirty) {
+      if (!this._hassSoft) return;
+      const gap = SOFT_GAP - (Date.now() - (this._hassAt || 0));
+      if (gap > 0) {
+        this._hassTimer = setTimeout(() => this.flushHass(), gap);
+        return;
+      }
+    }
+    this._hassDirty = false;
+    this._hassSoft = false;
+    this._hassAt = Date.now();
     const hass = hassOf();
     const slot = this._slot;
     const menu = this._menu;
