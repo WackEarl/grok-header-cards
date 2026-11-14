@@ -279,17 +279,35 @@ function toggleEntity(id) {
   if (pending && typeof pending.catch === "function") pending.catch(() => {});
 }
 
+const POKED = new WeakMap();
+
 function poke(el, hass) {
   if (!el) return;
+  POKED.set(el, hass);
   el.hass = hass;
   if (typeof el.requestUpdate === "function") el.requestUpdate("hass", null);
 }
 
+// Later updates only hand over a new hass object, like hui-card does. A forced
+// requestUpdate makes mushroom-chips-card rebuild every chip element.
+function pokeChanged(el, hass) {
+  if (!el || POKED.get(el) === hass) return;
+  POKED.set(el, hass);
+  el.hass = hass;
+}
+
+// Only write on change: the menu observer watches `hidden`, and even an
+// unchanged attribute write queues a mutation record (repaint loop).
 function setMenuVisible(menu, open) {
   if (!menu) return;
-  menu.hidden = !open;
-  menu.style.setProperty("display", open ? "flex" : "none", "important");
+  if (menu.hidden !== !open) menu.hidden = !open;
+  const display = open ? "flex" : "none";
+  if (menu.style.getPropertyValue("display") !== display || menu.style.getPropertyPriority("display") !== "important") {
+    menu.style.setProperty("display", display, "important");
+  }
 }
+
+const BADGE_GAP = 500;
 
 function buttonHidden(count, config) {
   if (count > 0) return false;
@@ -883,17 +901,29 @@ class HeaderCardsController {
     }
   }
 
+  // Coalesce: one pending paint at a time, at most one full pass per BADGE_GAP.
   refreshBadge() {
-    clearTimeout(this._badgeTimer);
-    this._badgeTimer = setTimeout(() => this.paintBadge(), 32);
+    if (this._badgeTimer) return;
+    const wait = Math.max(32, BADGE_GAP - (Date.now() - (this._badgeAt || 0)));
+    this._badgeTimer = setTimeout(() => {
+      this._badgeTimer = null;
+      this.paintBadge();
+    }, wait);
   }
 
-  paintBadge() {
+  paintBadge(iconOnly) {
     const slot = this._slot;
     const menu = this._menu;
     if (!slot || !menu) return;
-    const count = countAlerts(menu, 0);
-    this.bindShadows(menu);
+    let count = this._badgeCount;
+    if (!iconOnly || count === undefined) {
+      clearTimeout(this._badgeTimer);
+      this._badgeTimer = null;
+      this._badgeAt = Date.now();
+      count = countAlerts(menu, 0);
+      this._badgeCount = count;
+      this.bindShadows(menu);
+    }
     if (this._pending) return;
     const button = slot.querySelector(".header-cards-toggle");
     const show = count > 0;
@@ -926,7 +956,7 @@ class HeaderCardsController {
           const reveal = () => requestAnimationFrame(() => {
             this._iconWait = false;
             this._iconTries = (this._iconTries || 0) + 1;
-            this.paintBadge();
+            this.paintBadge(true);
           });
           if (customElements.get("ha-icon")) reveal();
           else customElements.whenDefined("ha-icon").then(reveal);
@@ -1150,7 +1180,7 @@ class HeaderCardsController {
     const roots = [slotLive ? slot : null, menuLive ? menu : null].filter((root) => root && root.querySelectorAll);
     for (const root of roots) {
       root.querySelectorAll(".header-card, .header-badge, .header-chip").forEach((el) => {
-        poke(el, hass);
+        pokeChanged(el, hass);
       });
       root.querySelectorAll("ha-state-icon").forEach((el) => {
         el.hass = hass;
@@ -1167,13 +1197,13 @@ class HeaderCardsController {
     const later = () => {
       this._badgeLate = null;
       if (this._dead) return;
-      this.paintBadge();
+      this.refreshBadge();
       if (!this._badgeAgain) return;
       this._badgeAgain = false;
       this._badgeLate = setTimeout(() => {
         this._badgeLate = null;
         this._badgeAgain = false;
-        if (!this._dead) this.paintBadge();
+        if (!this._dead) this.refreshBadge();
       }, 1000);
     };
     this._badgeLate = setTimeout(later, 1000);
