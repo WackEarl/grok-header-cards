@@ -1,0 +1,20 @@
+# Changelog
+
+## [Unreleased] - planned 1.0.3
+
+### Fixed
+- First load no longer freezes the dashboard for several seconds when
+  `header_cards` hosts cards such as auto-entities (#89). Hosted badges and
+  cards are no longer mounted in the first render. They wait for a painted
+  frame and Home Assistant's first state flush (at most 10 s), then mount one
+  per idle slot (`requestIdleCallback`, timer fallback for Safari), toolbar
+  items before overflow-menu cards.
+- Overflow-menu cards still mount without the menu being opened: the bell
+  counts their chips and stays hidden while that count is 0. The bell and the
+  toolbar items appear once all hosted cards are mounted, a moment later than
+  before, with their final count.
+
+### Added
+- `?hc_perf=1` on the dashboard URL adds `performance.measure` entries
+  `hc:paintHosted` (whole async mount, including `loadCardHelpers`),
+  `hc:hostedGate` and `hc:mountHosted:<id>`. Off by default.
