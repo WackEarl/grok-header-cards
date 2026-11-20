@@ -383,6 +383,53 @@ function watchList(config) {
   return { ids, labels, hard };
 }
 
+// Opt-in timing for profiling: add ?hc_perf=1 to the dashboard URL. Off by
+// default, then it costs one boolean check per hosted mount.
+const PERF = (() => {
+  try {
+    return new URLSearchParams(location.search).get("hc_perf") === "1" && typeof performance.measure === "function";
+  } catch {
+    return false;
+  }
+})();
+
+function perfSpan(name, start) {
+  if (!PERF) return;
+  try {
+    performance.measure(name, { start, end: performance.now() });
+  } catch {
+    /* measure options unsupported */
+  }
+}
+
+const IDLE_TIMEOUT = 1500;
+// Longest wait for HA's first state flush before hosted cards mount anyway.
+const STATES_WAIT = 10000;
+
+// Resolves after the next painted frame plus an idle moment (at most
+// IDLE_TIMEOUT later). Safari has no requestIdleCallback, a short timer after
+// the frame at least keeps the work out of the current task. Hidden tabs do
+// not paint, so a timer starts the idle wait there too.
+function afterPaintIdle() {
+  return new Promise((resolve) => {
+    let started = false;
+    const idle = () => {
+      if (started) return;
+      started = true;
+      if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: IDLE_TIMEOUT });
+      else setTimeout(resolve, 16);
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(idle, 0));
+    setTimeout(idle, IDLE_TIMEOUT);
+  });
+}
+
+function hasStates(hass) {
+  if (!hass || !hass.states) return false;
+  for (const id in hass.states) if (id) return true;
+  return false;
+}
+
 function waitForElement(tag, ms) {
   if (customElements.get(tag)) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -1100,6 +1147,22 @@ class HeaderCardsController {
   }
 
   async paintHosted(slot, config, hass) {
+    if (!PERF) return this.mountHosted(slot, config, hass);
+    const start = performance.now();
+    try {
+      return await this.mountHosted(slot, config, hass);
+    } finally {
+      perfSpan("hc:paintHosted", start);
+    }
+  }
+
+  // #89: hosted cards (auto-entities and friends) start heavy work as soon as
+  // they get hass. Mounting them in the first render froze the dashboard for
+  // seconds, so they wait for a painted frame and HA's first state flush and
+  // then mount one per idle slot, toolbar items before overflow-menu cards.
+  // Menu cards cannot wait for the menu to open: the bell counts their chips
+  // and stays hidden while that count is 0.
+  async mountHosted(slot, config, hass) {
     if (!this._helpers && window.loadCardHelpers) {
       try {
         this._helpers = window.loadCardHelpers();
@@ -1123,19 +1186,22 @@ class HeaderCardsController {
     const items = [
       ...config.badges.map((item) => ({ item, kind: "badge" })),
       ...config.cards.map((item) => ({ item, kind: "card" })),
-    ];
+    ].map((entry, index) => ({ ...entry, id: `h${index}`, inline: entry.kind !== "card" || !menuCard(entry.item) }));
+    items.sort((a, b) => Number(b.inline) - Number(a.inline));
+    const gateStart = PERF ? performance.now() : 0;
+    const gateEnd = Date.now() + STATES_WAIT;
+    do {
+      await afterPaintIdle();
+      if (this._dead) return false;
+    } while (!hasStates(hassOf()) && Date.now() < gateEnd);
+    perfSpan("hc:hostedGate", gateStart);
     const host = this._menu || slot;
     let pending = false;
     for (let index = 0; index < items.length; index += 1) {
-      const inline = items[index].kind !== "card" || !menuCard(items[index].item);
-      const ok = await this.addHosted(
-        inline ? slot : host,
-        items[index].item,
-        items[index].kind,
-        hass,
-        `h${index}`,
-        inline,
-      );
+      if (index > 0) await afterPaintIdle();
+      if (this._dead) return pending;
+      const { item, kind, id, inline } = items[index];
+      const ok = await this.addHosted(inline ? slot : host, item, kind, hassOf() || hass, id, inline);
       if (this._dead) return pending;
       if (!ok) pending = true;
     }
@@ -1169,6 +1235,7 @@ class HeaderCardsController {
         return true;
       }
     }
+    const mountStart = PERF ? performance.now() : 0;
     let el;
     try {
       el = factory(item);
@@ -1198,6 +1265,7 @@ class HeaderCardsController {
     slot.appendChild(wrap);
     if (!inline) flattenMenuRoot(el.shadowRoot);
     poke(el, hass);
+    perfSpan(`hc:mountHosted:${id}`, mountStart);
     return true;
   }
 
