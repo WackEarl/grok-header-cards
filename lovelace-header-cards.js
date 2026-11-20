@@ -112,6 +112,7 @@ function normalize(config) {
     show_empty: !!(config.show_empty || (nested && nested.show_empty)),
     content_info: config.content_info || (nested && nested.content_info) || "name",
     tap_action: actionOf(config.tap_action || (nested && nested.tap_action), "toggle"),
+    chip_style: (config.chip_style || (nested && nested.chip_style)) === "list" ? "list" : "mushroom",
     labels,
     cards,
     badges,
@@ -641,14 +642,20 @@ class HeaderCardsController {
     if (!hass || !hass.states || !config.labels.length) return [];
     const wanted = config.labels.map((label) => label.toLowerCase());
     const list = [];
+    const group = new Map();
     for (const entityId of Object.keys(hass.states)) {
       const names = labelNames(hass, entityId);
-      if (!wanted.some((label) => names.includes(label))) continue;
+      const rank = wanted.findIndex((label) => names.includes(label));
+      if (rank < 0) continue;
       const state = hass.states[entityId];
       if (!state || state.state !== "on") continue;
+      group.set(state, rank);
       list.push(state);
     }
-    list.sort((a, b) => (Date.parse(b.last_changed || "") || 0) - (Date.parse(a.last_changed || "") || 0));
+    // One group per label in config order, newest first inside a group:
+    // the same order as auto-entities with one include rule per label.
+    list.sort((a, b) => group.get(a) - group.get(b)
+      || (Date.parse(b.last_changed || "") || 0) - (Date.parse(a.last_changed || "") || 0));
     return list;
   }
 
@@ -1094,6 +1101,12 @@ class HeaderCardsController {
 
   paintLabels(node, config, chips, hass) {
     node.replaceChildren();
+    // Mushroom look: chips stacked like a hosted mushroom-chips-card in the
+    // menu (flattenMenuRoot), list look: full-width rows. The 2px top padding
+    // stands in for the menu gap above a hosted card, so chips sit where they did.
+    node.style.cssText = config.chip_style === "list"
+      ? "display:flex;flex-direction:column;gap:6px;"
+      : `display:flex;flex-direction:column;align-items:flex-start;gap:2px;${chips.length ? "padding-top:2px;" : ""}`;
     if (!chips.length) {
       if (!config.show_empty) return;
       const empty = document.createElement("span");
@@ -1109,6 +1122,7 @@ class HeaderCardsController {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "header-chip";
+    if (config.chip_style !== "list") return this.mushroomChip(button, state, config, hass);
     button.style.cssText = [
       "display:flex",
       "align-items:center",
@@ -1136,6 +1150,10 @@ class HeaderCardsController {
       text.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
       button.appendChild(text);
     }
+    return this.chipAction(button, state, config);
+  }
+
+  chipAction(button, state, config) {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1144,6 +1162,67 @@ class HeaderCardsController {
       else if (config.tap_action === "toggle") actOn(state.entity_id);
     });
     return button;
+  }
+
+  // Looks like a Mushroom entity chip (piitaya/lovelace-mushroom v5.3.0,
+  // src/shared/chip.ts) as it renders inside the menu today: flattenMenuRoot
+  // pins height 36px, icon 18px, radius 18px, padding 0 8px and clears
+  // --ha-card-background/-box-shadow/-border-width. Mushroom theme variables
+  // (--mush-chip-*) still apply the same way they do for Mushroom.
+  mushroomChip(button, state, config, hass) {
+    button.style.cssText = [
+      "-webkit-appearance:none",
+      "appearance:none",
+      "box-sizing:content-box",
+      "display:flex",
+      "flex-direction:row",
+      "align-items:center",
+      "justify-content:center",
+      "flex:none",
+      "margin:0",
+      "height:var(--header-cards-chip-height, 36px)",
+      "min-width:var(--header-cards-chip-height, 36px)",
+      "padding:var(--header-cards-chip-padding, 0 8px)",
+      "border-style:solid",
+      "border-width:var(--mush-chip-border-width, 0px)",
+      "border-color:var(--mush-chip-border-color, var(--ha-card-border-color, var(--divider-color, #e0e0e0)))",
+      "border-radius:var(--header-cards-chip-border-radius, 18px)",
+      "background:var(--mush-chip-background, transparent)",
+      "box-shadow:var(--mush-chip-box-shadow, none)",
+      "color:var(--primary-text-color)",
+      "font-family:inherit",
+      "font-style:inherit",
+      "letter-spacing:inherit",
+      // em units below resolve against the chip height, as in Mushroom
+      "font-size:var(--header-cards-chip-height, 36px)",
+      "line-height:0",
+      "text-align:center",
+      "cursor:pointer",
+    ].join(";");
+    const icon = document.createElement("ha-state-icon");
+    icon.hass = hass;
+    icon.stateObj = state;
+    icon.style.cssText = [
+      "display:flex",
+      "line-height:0",
+      "--mdc-icon-size:var(--header-cards-chip-icon-size, 18px)",
+      "color:var(--primary-text-color)",
+    ].join(";");
+    button.appendChild(icon);
+    if (config.content_info !== "none") {
+      icon.style.marginRight = "0.15em";
+      const text = document.createElement("span");
+      text.textContent = config.content_info === "state" ? state.state : state.attributes.friendly_name || state.entity_id;
+      text.style.cssText = [
+        "font-weight:var(--mush-chip-font-weight, bold)",
+        "font-size:var(--mush-chip-font-size, 0.3em)",
+        "line-height:1",
+        "color:var(--primary-text-color)",
+        "white-space:nowrap",
+      ].join(";");
+      button.appendChild(text);
+    }
+    return this.chipAction(button, state, config);
   }
 
   async paintHosted(slot, config, hass) {

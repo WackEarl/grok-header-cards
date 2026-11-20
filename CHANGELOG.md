@@ -14,6 +14,15 @@
   toolbar items appear once all hosted cards are mounted, a moment later than
   before, with their final count.
 
+### Changed
+- `labels` chips now look like Mushroom entity chips as they render in the
+  menu today (height 36px, icon 18px, radius 18px, bold 0.3em text, stacked
+  with 2px gap, transparent background). `--mush-chip-*` theme variables
+  apply as they do for Mushroom. `chip_style: list` keeps the old full-width
+  rows.
+- `labels` chips are grouped by label in config order, newest first inside a
+  group, like auto-entities with one include rule per label.
+
 ### Added
 - `?hc_perf=1` on the dashboard URL adds `performance.measure` entries
   `hc:paintHosted` (whole async mount, including `loadCardHelpers`),
